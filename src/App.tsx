@@ -89,6 +89,8 @@ const BACKGROUND_COLORS = [
 ]
 const INITIAL_BRUSH_COLOR = '#7eff75'
 const INITIAL_BRUSH_SIZE = 18
+const MAX_STORED_IMAGE_DIMENSION = 1600
+const STORED_IMAGE_QUALITY = 0.9
 
 function createDesignId(): string {
   const nativeRandomUuid = globalThis.crypto?.randomUUID
@@ -104,7 +106,35 @@ function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
 
-    reader.onload = () => resolve(String(reader.result))
+    reader.onload = async () => {
+      const rawDataUrl = String(reader.result)
+
+      try {
+        const image = await loadImageElement(rawDataUrl)
+        const width = image.naturalWidth || image.width
+        const height = image.naturalHeight || image.height
+        const scale = Math.min(
+          1,
+          MAX_STORED_IMAGE_DIMENSION / Math.max(width, height),
+        )
+        const targetWidth = Math.max(1, Math.round(width * scale))
+        const targetHeight = Math.max(1, Math.round(height * scale))
+        const exportCanvas = document.createElement('canvas')
+        exportCanvas.width = targetWidth
+        exportCanvas.height = targetHeight
+        const context = exportCanvas.getContext('2d')
+
+        if (!context) {
+          resolve(rawDataUrl)
+          return
+        }
+
+        context.drawImage(image, 0, 0, targetWidth, targetHeight)
+        resolve(exportCanvas.toDataURL('image/webp', STORED_IMAGE_QUALITY))
+      } catch {
+        resolve(rawDataUrl)
+      }
+    }
     reader.onerror = () => reject(reader.error ?? new Error('Failed to read file.'))
     reader.readAsDataURL(file)
   })
@@ -429,6 +459,7 @@ function App() {
   const undoActionRef = useRef<() => void>(() => undefined)
   const clearSlotActionRef = useRef<() => boolean>(() => false)
   const pushHistorySnapshotRef = useRef<() => void>(() => undefined)
+  const hasPersistedDesignsRef = useRef(false)
 
   const currentDesign = designs.find((item) => item.id === selectedDesignId) ?? null
   const activeSlotDesignId = assignments[selectedSlotId] ?? null
@@ -576,7 +607,25 @@ function App() {
   }
 
   useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEYS.designs, JSON.stringify(designs))
+    if (!hasPersistedDesignsRef.current) {
+      hasPersistedDesignsRef.current = true
+      return
+    }
+
+    try {
+      window.localStorage.setItem(STORAGE_KEYS.designs, JSON.stringify(designs))
+    } catch (error) {
+      console.error('Failed to persist designs to localStorage.', error)
+
+      if (
+        error instanceof DOMException &&
+        error.name === 'QuotaExceededError'
+      ) {
+        window.alert(
+          '当前保存内容超过了浏览器本地存储上限。我已经把上传图片改成压缩后再保存；如果这次仍然超限，请先删除部分旧 Skin，或改用更小的图片后再试。',
+        )
+      }
+    }
   }, [designs])
 
   useEffect(() => {
