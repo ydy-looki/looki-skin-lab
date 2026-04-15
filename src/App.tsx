@@ -220,29 +220,24 @@ function readDesignsFromStorage(): StickerDesign[] {
           : typeof design.json?.backgroundColor === 'string'
             ? design.json.backgroundColor
             : DEFAULT_STICKER_BACKGROUND_COLOR,
+      preview: typeof design.preview === 'string' ? design.preview : '',
+      storageState: 'saved',
     }))
   } catch {
     return []
   }
 }
 
-function readAssignmentsFromStorage(): LayoutAssignments {
-  const empty = createEmptyAssignments()
+function serializeDesignForStorage(design: StickerDesign): Omit<StickerDesign, 'storageState' | 'preview'> {
+  const {
+    preview,
+    storageState,
+    ...persistedDesign
+  } = design
+  void preview
+  void storageState
 
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEYS.layout)
-    if (!raw) {
-      return empty
-    }
-
-    const parsed = JSON.parse(raw) as LayoutAssignments
-    return {
-      ...empty,
-      ...parsed,
-    }
-  } catch {
-    return empty
-  }
+  return persistedDesign
 }
 
 function formatTimeLabel(input: string): string {
@@ -406,9 +401,7 @@ function LayoutPreview({
 
 function App() {
   const [designs, setDesigns] = useState<StickerDesign[]>(readDesignsFromStorage)
-  const [assignments, setAssignments] = useState<LayoutAssignments>(
-    readAssignmentsFromStorage,
-  )
+  const [assignments, setAssignments] = useState<LayoutAssignments>(createEmptyAssignments)
   const [page, setPage] = useState<'editor' | 'layout'>('editor')
   const [deviceColor, setDeviceColor] = useState<DeviceColor>('green')
   const [currentName, setCurrentName] = useState(createDesignName(designs.length))
@@ -444,6 +437,11 @@ function App() {
   const pushHistorySnapshotRef = useRef<() => void>(() => undefined)
   const hasPersistedDesignsRef = useRef(false)
   const previewSequenceRef = useRef(0)
+  const lastPersistedDesignsRef = useRef(
+    designs
+      .filter((design) => design.storageState !== 'memory')
+      .map(serializeDesignForStorage),
+  )
 
   const currentDesign = designs.find((item) => item.id === selectedDesignId) ?? null
   const activeSlotDesignId = assignments[selectedSlotId] ?? null
@@ -606,8 +604,26 @@ function App() {
       return
     }
 
+    const persistedDesigns = designs.filter((design) => design.storageState !== 'memory')
+    const hasPendingDesigns = designs.some((design) => design.storageState === 'pending')
+
     try {
-      window.localStorage.setItem(STORAGE_KEYS.designs, JSON.stringify(designs))
+      const serializedDesigns = persistedDesigns.map(serializeDesignForStorage)
+      window.localStorage.setItem(
+        STORAGE_KEYS.designs,
+        JSON.stringify(serializedDesigns),
+      )
+      lastPersistedDesignsRef.current = serializedDesigns
+
+      if (hasPendingDesigns) {
+        setDesigns((previous) =>
+          previous.map((design) => (
+            design.storageState === 'pending'
+              ? { ...design, storageState: 'saved' }
+              : design
+          )),
+        )
+      }
     } catch (error) {
       console.error('Failed to persist designs to localStorage.', error)
 
@@ -615,9 +631,24 @@ function App() {
         error instanceof DOMException &&
         error.name === 'QuotaExceededError'
       ) {
-        window.alert(
-          '当前保存内容超过了浏览器本地存储上限。我已经把上传图片改成压缩后再保存；如果这次仍然超限，请先删除部分旧 Skin，或改用更小的图片后再试。',
-        )
+        try {
+          window.localStorage.setItem(
+            STORAGE_KEYS.designs,
+            JSON.stringify(lastPersistedDesignsRef.current),
+          )
+        } catch (fallbackError) {
+          console.error('Failed to persist saved designs after quota fallback.', fallbackError)
+        }
+
+        if (hasPendingDesigns) {
+          setDesigns((previous) =>
+            previous.map((design) => (
+              design.storageState === 'pending'
+                ? { ...design, storageState: 'memory' }
+                : design
+            )),
+          )
+        }
       }
     }
   }, [designs])
@@ -648,8 +679,12 @@ function App() {
   }, [designs])
 
   useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEYS.layout, JSON.stringify(assignments))
-  }, [assignments])
+    try {
+      window.localStorage.removeItem(STORAGE_KEYS.layout)
+    } catch (error) {
+      console.warn('Failed to clear persisted layout cache.', error)
+    }
+  }, [])
 
   useEffect(() => {
     if (!pickedLayoutDesignId && designs.length > 0) {
@@ -971,6 +1006,7 @@ function App() {
       name,
       preview,
       previewColor: deviceColor,
+      storageState: 'pending',
       updatedAt: new Date().toISOString(),
     }
 
@@ -1431,7 +1467,7 @@ function App() {
                   <p>上传一张图片或在画布里绘制后，点“保存当前 Skin”就会出现在这里。</p>
                 </div>
               ) : (
-                <div className="design-list">
+              <div className="design-list">
                   {designs.map((design) => (
                     <article
                       key={design.id}
@@ -1443,7 +1479,24 @@ function App() {
                         <img src={designSkinPreviewMap.get(design.id) ?? design.preview} alt="" />
                       </div>
                       <div className="design-card__content">
-                        <strong>{design.name}</strong>
+                        <div className="design-card__title-row">
+                          <strong>{design.name}</strong>
+                          <span
+                            className={`design-card__status ${
+                              design.storageState === 'memory'
+                                ? 'is-memory'
+                                : design.storageState === 'pending'
+                                  ? 'is-pending'
+                                  : 'is-saved'
+                            }`}
+                          >
+                            {design.storageState === 'memory'
+                              ? '仅当前会话'
+                              : design.storageState === 'pending'
+                                ? '保存中'
+                                : '已保存'}
+                          </span>
+                        </div>
                         <span>{formatTimeLabel(design.updatedAt)}</span>
                       </div>
                       <div className="design-card__actions">

@@ -602,8 +602,41 @@
   gap: 6px;
 }
 
+.design-card__title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
 .design-card__content strong {
   font-size: 1rem;
+}
+
+.design-card__status {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.design-card__status.is-saved {
+  background: rgba(109, 197, 60, 0.14);
+  color: #4f7f2d;
+}
+
+.design-card__status.is-pending {
+  background: rgba(79, 134, 255, 0.12);
+  color: #3f63b9;
+}
+
+.design-card__status.is-memory {
+  background: rgba(255, 176, 32, 0.16);
+  color: #996617;
 }
 
 .design-card__content span {

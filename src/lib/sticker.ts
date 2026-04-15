@@ -9,6 +9,7 @@ export interface StickerDesign {
   json: Record<string, unknown>
   preview: string
   previewColor: DeviceColor
+  storageState?: 'saved' | 'pending' | 'memory'
   updatedAt: string
 }
 
