@@ -10,6 +10,10 @@ import {
   FabricImage,
   PencilBrush,
 } from 'fabric'
+import {
+  PDFDocument,
+  rgb,
+} from 'pdf-lib'
 import blackDevice from '../reference/black.webp'
 import greenDevice from '../reference/green.webp'
 import whiteDevice from '../reference/white.webp'
@@ -22,16 +26,16 @@ import {
   type DeviceColor,
   type LayoutAssignments,
   LAYOUT_SLOTS,
+  PRINT_BLEED_MM,
   STICKER_MM,
   STICKER_PX,
   STORAGE_KEYS,
-  buildCutBoardSvg,
   createDesignName,
   createEmptyAssignments,
   createFabricClipPath,
   createStickerPath,
   downloadBlob,
-  mmToPrintPx,
+  renderDesignForPrintBleed,
   renderDesignForExport,
   type StickerDesign,
 } from './lib/sticker'
@@ -90,6 +94,7 @@ const BACKGROUND_COLORS = [
 const INITIAL_BRUSH_COLOR = '#7eff75'
 const INITIAL_BRUSH_SIZE = 18
 const MAX_STORED_IMAGE_DIMENSION = 1600
+const PDF_PT_PER_MM = 72 / 25.4
 const STORED_IMAGE_QUALITY = 0.9
 
 function createDesignId(): string {
@@ -251,51 +256,54 @@ function formatTimeLabel(input: string): string {
   }).format(date)
 }
 
-function formatSheetLabel(input: string, maxLength = 18): string {
-  const trimmed = input.trim()
-  if (!trimmed) {
-    return ''
-  }
-
-  return trimmed.length > maxLength
-    ? `${trimmed.slice(0, maxLength - 1)}…`
-    : trimmed
-}
-
 function getCanvasBackgroundColor(canvas: FabricCanvas): string {
   return typeof canvas.backgroundColor === 'string' && canvas.backgroundColor
     ? canvas.backgroundColor
     : DEFAULT_STICKER_BACKGROUND_COLOR
 }
 
-function drawStickerOutline(
-  context: CanvasRenderingContext2D,
+function mmToPdfPt(mm: number): number {
+  return mm * PDF_PT_PER_MM
+}
+
+function drawPdfStickerCutLine(
+  page: {
+    drawEllipse: (options: Record<string, unknown>) => void
+    getHeight: () => number
+  },
   xMm: number,
   yMm: number,
-  widthMm: number,
-  heightMm: number,
-  strokeStyle: string,
-  lineWidth: number,
 ): void {
-  const x = mmToPrintPx(xMm)
-  const y = mmToPrintPx(yMm)
-  const width = mmToPrintPx(widthMm)
-  const height = mmToPrintPx(heightMm)
-  const centerX = x + width / 2
-  const centerY = y + height / 2
-  const holeCenterX = x + width * CAMERA_GUIDE.centerXRatio
-  const holeRadius = height * CAMERA_GUIDE.radiusRatio
-  const holeCenterY = y + height * CAMERA_GUIDE.centerYRatio
+  const pageHeight = page.getHeight()
+  const stickerWidthPt = mmToPdfPt(STICKER_MM.width)
+  const stickerHeightPt = mmToPdfPt(STICKER_MM.height)
+  const stickerLeftPt = mmToPdfPt(xMm)
+  const stickerTopPt = mmToPdfPt(yMm)
+  const outerCenterX = stickerLeftPt + stickerWidthPt / 2
+  const outerCenterY = pageHeight - (stickerTopPt + stickerHeightPt / 2)
+  const holeCenterX = mmToPdfPt(xMm + STICKER_MM.width * CAMERA_GUIDE.centerXRatio)
+  const holeCenterY = pageHeight -
+    mmToPdfPt(yMm + STICKER_MM.height * CAMERA_GUIDE.centerYRatio)
+  const holeRadiusPt = mmToPdfPt(CAMERA_HOLE_MM / 2)
 
-  context.save()
-  context.strokeStyle = strokeStyle
-  context.lineWidth = lineWidth
-  context.beginPath()
-  context.ellipse(centerX, centerY, width / 2, height / 2, 0, 0, Math.PI * 2)
-  context.moveTo(holeCenterX + holeRadius, holeCenterY)
-  context.arc(holeCenterX, holeCenterY, holeRadius, 0, Math.PI * 2)
-  context.stroke()
-  context.restore()
+  page.drawEllipse({
+    borderColor: rgb(0.91, 0.07, 0.35),
+    borderWidth: 0.8,
+    color: undefined,
+    x: outerCenterX,
+    xScale: stickerWidthPt / 2,
+    y: outerCenterY,
+    yScale: stickerHeightPt / 2,
+  })
+  page.drawEllipse({
+    borderColor: rgb(0.91, 0.07, 0.35),
+    borderWidth: 0.8,
+    color: undefined,
+    x: holeCenterX,
+    xScale: holeRadiusPt,
+    y: holeCenterY,
+    yScale: holeRadiusPt,
+  })
 }
 
 function loadImageElement(src: string): Promise<HTMLImageElement> {
@@ -310,14 +318,16 @@ function loadImageElement(src: string): Promise<HTMLImageElement> {
 
 function LayoutPreview({
   assignments,
+  designLookup,
   highlightedDesignId,
-  previewDesigns,
+  previewUrls,
   selectedSlotId,
   onSelectSlot,
 }: {
   assignments: LayoutAssignments
+  designLookup: Map<string, StickerDesign>
   highlightedDesignId: string | null
-  previewDesigns: Map<string, StickerDesign>
+  previewUrls: Map<string, string>
   selectedSlotId: string
   onSelectSlot: (slotId: string) => void
 }) {
@@ -336,29 +346,10 @@ function LayoutPreview({
         rx="2.5"
         fill="#fffdfa"
       />
-      <rect
-        x="5.5"
-        y="5.5"
-        width={A4_MM.width - 11}
-        height={A4_MM.height - 11}
-        rx="2.5"
-        fill="none"
-        stroke="#d7dde5"
-        strokeDasharray="1.4 1.2"
-        strokeWidth="0.45"
-      />
-      <text x="14" y="17" className="paper-preview__title">
-        Looki Skin Lab Sheet
-      </text>
-      <text x="14" y="22.4" className="paper-preview__subtitle">
-        点击纸面位置放入当前选中的 Skin
-      </text>
       {LAYOUT_SLOTS.map((slot) => {
         const assignedDesignId = assignments[slot.id]
-        const design = assignedDesignId
-          ? previewDesigns.get(assignedDesignId)
-          : undefined
-        const label = design ? formatSheetLabel(design.name) : ''
+        const design = assignedDesignId ? designLookup.get(assignedDesignId) : undefined
+        const previewUrl = assignedDesignId ? previewUrls.get(assignedDesignId) : undefined
         const isSelected = selectedSlotId === slot.id
         const isEmphasized = highlightedDesignId !== null &&
           highlightedDesignId === assignedDesignId
@@ -369,13 +360,13 @@ function LayoutPreview({
             className="paper-preview__slot"
             onClick={() => onSelectSlot(slot.id)}
           >
-            {design ? (
+            {design && previewUrl ? (
               <image
-                href={design.preview}
-                x={slot.x}
-                y={slot.y}
-                width={STICKER_MM.width}
-                height={STICKER_MM.height}
+                href={previewUrl}
+                x={slot.x - PRINT_BLEED_MM}
+                y={slot.y - PRINT_BLEED_MM}
+                width={STICKER_MM.width + PRINT_BLEED_MM * 2}
+                height={STICKER_MM.height + PRINT_BLEED_MM * 2}
                 preserveAspectRatio="none"
               />
             ) : (
@@ -406,15 +397,6 @@ function LayoutPreview({
               }
               strokeWidth={isSelected ? 0.85 : 0.45}
             />
-            {label ? (
-              <text
-                x={slot.x + STICKER_MM.width / 2}
-                y={slot.y + STICKER_MM.height + 4}
-                className="paper-preview__slot-label"
-              >
-                {label}
-              </text>
-            ) : null}
           </g>
         )
       })}
@@ -437,6 +419,7 @@ function App() {
   const [selectedSlotId, setSelectedSlotId] = useState(
     LAYOUT_SLOTS[0]?.id ?? '',
   )
+  const [designSkinPreviewUrls, setDesignSkinPreviewUrls] = useState<Record<string, string>>({})
   const [previewUrl, setPreviewUrl] = useState('')
   const [backgroundColor, setBackgroundColor] = useState(
     DEFAULT_STICKER_BACKGROUND_COLOR,
@@ -460,6 +443,7 @@ function App() {
   const clearSlotActionRef = useRef<() => boolean>(() => false)
   const pushHistorySnapshotRef = useRef<() => void>(() => undefined)
   const hasPersistedDesignsRef = useRef(false)
+  const previewSequenceRef = useRef(0)
 
   const currentDesign = designs.find((item) => item.id === selectedDesignId) ?? null
   const activeSlotDesignId = assignments[selectedSlotId] ?? null
@@ -468,6 +452,9 @@ function App() {
   const savedCount = designs.length
   const layoutCount = Object.values(assignments).filter(Boolean).length
   const designMap = new Map(designs.map((design) => [design.id, design]))
+  const designSkinPreviewMap = new Map(
+    designs.map((design) => [design.id, designSkinPreviewUrls[design.id] ?? design.preview]),
+  )
   const deviceOverlayStyle: CSSProperties = {
     left: `${(devicePreview.previewFrame.x / devicePreview.size.width) * 100}%`,
     top: `${(devicePreview.previewFrame.y / devicePreview.size.height) * 100}%`,
@@ -485,13 +472,20 @@ function App() {
         return
       }
 
-      setPreviewUrl(
-        canvas.toDataURL({
-          enableRetinaScaling: false,
-          format: 'png',
-          multiplier: 0.34,
-        }),
-      )
+      const sequence = ++previewSequenceRef.current
+      const payload = serializeCanvasState(canvas)
+
+      void renderDesignForPrintBleed(payload, getCanvasBackgroundColor(canvas))
+        .then((nextPreviewUrl) => {
+          if (previewSequenceRef.current !== sequence) {
+            return
+          }
+
+          setPreviewUrl(nextPreviewUrl)
+        })
+        .catch((error) => {
+          console.warn('Failed to generate live skin preview.', error)
+        })
     }, 100)
   }
 
@@ -629,6 +623,31 @@ function App() {
   }, [designs])
 
   useEffect(() => {
+    let cancelled = false
+
+    void Promise.all(
+      designs.map(async (design) => [
+        design.id,
+        await renderDesignForPrintBleed(design.json, design.backgroundColor),
+      ] as const),
+    )
+      .then((entries) => {
+        if (cancelled) {
+          return
+        }
+
+        setDesignSkinPreviewUrls(Object.fromEntries(entries))
+      })
+      .catch((error) => {
+        console.warn('Failed to generate saved skin previews.', error)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [designs])
+
+  useEffect(() => {
     window.localStorage.setItem(STORAGE_KEYS.layout, JSON.stringify(assignments))
   }, [assignments])
 
@@ -750,13 +769,7 @@ function App() {
     const frame = window.requestAnimationFrame(() => {
       canvas.calcOffset()
       canvas.requestRenderAll()
-      setPreviewUrl(
-        canvas.toDataURL({
-          enableRetinaScaling: false,
-          format: 'png',
-          multiplier: 0.34,
-        }),
-      )
+      queuePreviewRefresh()
     })
 
     return () => {
@@ -939,18 +952,14 @@ function App() {
     await applyCanvasBase(design.json, design.backgroundColor)
   }
 
-  const saveCurrentDesign = (forceNew: boolean) => {
+  const saveCurrentDesign = async (forceNew: boolean) => {
     const canvas = fabricCanvasRef.current
     if (!canvas) {
       return
     }
 
     const payload = serializeCanvasState(canvas)
-    const preview = canvas.toDataURL({
-      enableRetinaScaling: false,
-      format: 'png',
-      multiplier: 0.34,
-    })
+    const preview = await renderDesignForPrintBleed(payload, backgroundColor)
     const name = currentName.trim() || createDesignName(designs.length)
     const isNew = forceNew || !selectedDesignId
     const nextId = isNew ? createDesignId() : selectedDesignId
@@ -1041,7 +1050,7 @@ function App() {
     return true
   }
 
-  const handleDownloadA4 = async () => {
+  const handleDownloadPrintPdf = async () => {
     const activeDesignIds = Array.from(
       new Set(Object.values(assignments).filter(Boolean)),
     ) as string[]
@@ -1054,7 +1063,21 @@ function App() {
     setIsExporting(true)
 
     try {
-      const renderedImages = new Map<string, HTMLImageElement>()
+      const pdfDocument = await PDFDocument.create()
+      const page = pdfDocument.addPage([
+        mmToPdfPt(A4_MM.width),
+        mmToPdfPt(A4_MM.height),
+      ])
+      const renderedImages = new Map<string, Awaited<ReturnType<typeof pdfDocument.embedPng>>>()
+
+      page.drawRectangle({
+        color: rgb(1, 1, 1),
+        height: page.getHeight(),
+        width: page.getWidth(),
+        x: 0,
+        y: 0,
+      })
+
       for (const designId of activeDesignIds) {
         const design = designMap.get(designId)
         if (!design) {
@@ -1063,57 +1086,19 @@ function App() {
 
         let dataUrl: string
         try {
-          dataUrl = await renderDesignForExport(design.json, design.backgroundColor)
+          dataUrl = await renderDesignForPrintBleed(
+            design.json,
+            design.backgroundColor,
+          )
         } catch (error) {
           console.warn(
-            `Failed to render sticker ${designId} from JSON, falling back to saved preview.`,
+            `Failed to render bleed-safe sticker ${designId} from JSON, falling back to normal export.`,
             error,
           )
-          dataUrl = design.preview
+          dataUrl = await renderDesignForExport(design.json, design.backgroundColor)
         }
-        const image = await loadImageElement(dataUrl)
+        const image = await pdfDocument.embedPng(dataUrl)
         renderedImages.set(designId, image)
-      }
-
-      const canvas = document.createElement('canvas')
-      canvas.width = Math.round(mmToPrintPx(A4_MM.width))
-      canvas.height = Math.round(mmToPrintPx(A4_MM.height))
-      const context = canvas.getContext('2d')
-      if (!context) {
-        throw new Error('Canvas context is unavailable.')
-      }
-
-      context.fillStyle = '#fffdfa'
-      context.fillRect(0, 0, canvas.width, canvas.height)
-      context.strokeStyle = '#d7dde5'
-      context.lineWidth = 1.4
-      context.strokeRect(
-        mmToPrintPx(5.5),
-        mmToPrintPx(5.5),
-        mmToPrintPx(A4_MM.width - 11),
-        mmToPrintPx(A4_MM.height - 11),
-      )
-      context.fillStyle = '#27313b'
-      context.font = '700 58px "Avenir Next", "PingFang SC", sans-serif'
-      context.fillText('Looki Skin Lab Sheet', mmToPrintPx(14), mmToPrintPx(17))
-      context.font = '400 28px "Avenir Next", "PingFang SC", sans-serif'
-      context.fillStyle = '#6d7885'
-      context.fillText(
-        'A4 print layout for Looki Skin Lab',
-        mmToPrintPx(14),
-        mmToPrintPx(22.4),
-      )
-
-      for (const slot of LAYOUT_SLOTS) {
-        drawStickerOutline(
-          context,
-          slot.x,
-          slot.y,
-          STICKER_MM.width,
-          STICKER_MM.height,
-          '#e0e6ec',
-          1.1,
-        )
       }
 
       for (const slot of LAYOUT_SLOTS) {
@@ -1127,53 +1112,24 @@ function App() {
           continue
         }
 
-        context.drawImage(
-          image,
-          mmToPrintPx(slot.x),
-          mmToPrintPx(slot.y),
-          mmToPrintPx(STICKER_MM.width),
-          mmToPrintPx(STICKER_MM.height),
-        )
+        page.drawImage(image, {
+          height: mmToPdfPt(STICKER_MM.height + PRINT_BLEED_MM * 2),
+          width: mmToPdfPt(STICKER_MM.width + PRINT_BLEED_MM * 2),
+          x: mmToPdfPt(slot.x - PRINT_BLEED_MM),
+          y: page.getHeight() -
+            mmToPdfPt(slot.y + STICKER_MM.height + PRINT_BLEED_MM),
+        })
+        drawPdfStickerCutLine(page, slot.x, slot.y)
       }
 
-      for (const slot of LAYOUT_SLOTS) {
-        const designId = assignments[slot.id]
-        const design = designId ? designMap.get(designId) : null
-        const label = design ? formatSheetLabel(design.name, 20) : ''
-        if (!label) {
-          continue
-        }
-
-        context.fillStyle = '#7e8994'
-        context.font = '600 18px "Avenir Next", "PingFang SC", sans-serif'
-        context.textAlign = 'center'
-        context.fillText(
-          label,
-          mmToPrintPx(slot.x + STICKER_MM.width / 2),
-          mmToPrintPx(slot.y + STICKER_MM.height + 4.2),
-        )
-      }
-
-      const blob = await new Promise<Blob | null>((resolve) => {
-        canvas.toBlob(resolve, 'image/png')
-      })
-
-      if (!blob) {
-        throw new Error('Failed to create PNG export.')
-      }
-
-      downloadBlob(blob, `looki-skin-lab-a4-sheet-${Date.now()}.png`)
+      const pdfBytes = Uint8Array.from(await pdfDocument.save())
+      downloadBlob(
+        new Blob([pdfBytes], { type: 'application/pdf' }),
+        `looki-skin-lab-print-sheet-${Date.now()}.pdf`,
+      )
     } finally {
       setIsExporting(false)
     }
-  }
-
-  const handleDownloadCutBoard = () => {
-    const svg = buildCutBoardSvg(assignments, designMap)
-    downloadBlob(
-      new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }),
-      `looki-skin-lab-cut-board-${Date.now()}.svg`,
-    )
   }
 
   return (
@@ -1184,9 +1140,7 @@ function App() {
       <header className="hero-strip">
         <div>
           <h1>Looki Skin Lab</h1>
-          <p className="hero-strip__subtitle">
-            上传、绘制、保存、排版与导出都在同一工作台完成。
-          </p>
+          <p className="hero-strip__subtitle">设计属于你的 Looki 贴纸</p>
         </div>
 
         <div className="hero-strip__stats">
@@ -1233,10 +1187,6 @@ function App() {
             <div className="panel-heading">
               <div>
                 <p className="panel-heading__kicker">Skin Design</p>
-                <h2>设计 Skin、继续编辑旧 Skin，并准备打印版本</h2>
-                <p className="panel-heading__copy">
-                  在 Looki Skin Lab 里直接对 Looki Skin 做上传、绘制和调整，顶部保留 {CAMERA_HOLE_MM}mm 开孔。
-                </p>
               </div>
             </div>
 
@@ -1245,7 +1195,6 @@ function App() {
                 <div className="section-title">
                   <div>
                     <h3>Looki 机身预览</h3>
-                    <p>所有编辑都直接叠加在机身预览上，方便随时看最终上机效果。</p>
                   </div>
                   <div className="device-editor-badges">
                     <span className="meta-chip">
@@ -1292,9 +1241,6 @@ function App() {
                   ))}
                 </div>
 
-                <p className="canvas-note">
-                  当前预览严格基于 reference 机身图；画布只负责真实可打印的 Skin 内容。
-                </p>
               </section>
             </div>
           </section>
@@ -1304,7 +1250,6 @@ function App() {
               <div className="section-title">
                 <div>
                   <h3>编辑控制</h3>
-                  <p>上传素材、开启绘制、管理图层，并保存为可复用的 Skin。</p>
                 </div>
               </div>
 
@@ -1375,7 +1320,23 @@ function App() {
                 <div className="live-preview-card">
                   <span>当前 Skin 缩略图</span>
                   <div className="live-preview-card__thumb">
-                    <img src={previewUrl} alt="" />
+                    <div className="live-preview-card__art">
+                      <img src={previewUrl} alt="" />
+                      <svg
+                        className="live-preview-card__outline"
+                        viewBox={`0 0 ${STICKER_MM.width + PRINT_BLEED_MM * 2} ${STICKER_MM.height + PRINT_BLEED_MM * 2}`}
+                        aria-hidden="true"
+                      >
+                        <path
+                          d={createStickerPath(
+                            STICKER_MM.width,
+                            STICKER_MM.height,
+                            PRINT_BLEED_MM,
+                            PRINT_BLEED_MM,
+                          )}
+                        />
+                      </svg>
+                    </div>
                   </div>
                 </div>
               ) : null}
@@ -1442,7 +1403,7 @@ function App() {
                 <button
                   type="button"
                   className="button-primary"
-                  onClick={() => saveCurrentDesign(false)}
+                  onClick={() => void saveCurrentDesign(false)}
                 >
                   {currentDesign ? '更新当前 Skin' : '保存当前 Skin'}
                 </button>
@@ -1451,7 +1412,7 @@ function App() {
               <button
                 type="button"
                 className="button-secondary"
-                onClick={() => saveCurrentDesign(true)}
+                onClick={() => void saveCurrentDesign(true)}
               >
                 另存为新 Skin
               </button>
@@ -1461,7 +1422,6 @@ function App() {
               <div className="section-title">
                 <div>
                   <h3>Skin Library</h3>
-                  <p>保存后的 Skin 可以继续编辑，也可以直接拿去打印排版。</p>
                 </div>
               </div>
 
@@ -1480,7 +1440,7 @@ function App() {
                       }`}
                     >
                       <div className="design-card__preview">
-                        <img src={design.preview} alt="" />
+                        <img src={designSkinPreviewMap.get(design.id) ?? design.preview} alt="" />
                       </div>
                       <div className="design-card__content">
                         <strong>{design.name}</strong>
@@ -1524,18 +1484,15 @@ function App() {
             <div className="panel-heading">
               <div>
                 <p className="panel-heading__kicker">Print Layout</p>
-                <h2>把多个 Skin 排进 A4 模板，并导出打印文件</h2>
-                <p className="panel-heading__copy">
-                  先在右侧选中一个 Skin，再点纸面位置放入；需要时也可以快速清空并重排。
-                </p>
               </div>
             </div>
 
             <div className="layout-panel__paper">
               <LayoutPreview
                 assignments={assignments}
+                designLookup={designMap}
                 highlightedDesignId={pickedLayoutDesignId}
-                previewDesigns={designMap}
+                previewUrls={designSkinPreviewMap}
                 selectedSlotId={selectedSlotId}
                 onSelectSlot={handleSlotSelect}
               />
@@ -1547,7 +1504,6 @@ function App() {
               <div className="section-title">
                 <div>
                   <h3>排版控制</h3>
-                  <p>为 Looki Skin Lab 的打印版位分配 Skin，并导出 PNG / SVG。</p>
                 </div>
               </div>
 
@@ -1596,22 +1552,11 @@ function App() {
                   type="button"
                   className="button-primary"
                   disabled={isExporting || layoutCount === 0}
-                  onClick={() => void handleDownloadA4()}
+                  onClick={() => void handleDownloadPrintPdf()}
                 >
-                  {isExporting ? '正在导出 A4 PNG...' : '下载 A4 图片'}
-                </button>
-                <button
-                  type="button"
-                  disabled={layoutCount === 0}
-                  onClick={handleDownloadCutBoard}
-                >
-                  下载切割刀板 SVG
+                  {isExporting ? '正在导出打印 PDF...' : '下载打印 PDF（图+刀线）'}
                 </button>
               </div>
-
-              <p className="helper-copy">
-                刀板文件默认只输出当前已放置 Skin 的位置；如果纸面为空，会回退为整张预制版位。
-              </p>
             </section>
 
             <section className="panel library-panel">
@@ -1637,7 +1582,7 @@ function App() {
                       }`}
                     >
                       <div className="design-card__preview">
-                        <img src={design.preview} alt="" />
+                        <img src={designSkinPreviewMap.get(design.id) ?? design.preview} alt="" />
                       </div>
                       <div className="design-card__content">
                         <strong>{design.name}</strong>

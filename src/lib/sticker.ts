@@ -39,6 +39,7 @@ export const STICKER_MM = {
 } as const
 
 export const DEFAULT_STICKER_BACKGROUND_COLOR = '#262626'
+export const PRINT_BLEED_MM = 3
 
 export const CAMERA_GUIDE = {
   centerXRatio: 0.5005555905044057,
@@ -54,9 +55,9 @@ export const A4_MM = {
 } as const
 
 const LAYOUT_COLUMNS = 4
-const LAYOUT_ROWS = 6
-const LAYOUT_START = { x: 16, y: 31 }
-const LAYOUT_GAP = { x: 8.5, y: 10 }
+const LAYOUT_ROWS = 7
+const LAYOUT_START = { x: 16, y: 9 }
+const LAYOUT_GAP = { x: 8.5, y: 8.5 }
 
 export const LAYOUT_SLOTS: LayoutSlot[] = Array.from(
   { length: LAYOUT_COLUMNS * LAYOUT_ROWS },
@@ -103,6 +104,24 @@ export function createStickerPath(
   ].join(' ')
 }
 
+function createOuterStickerPath(
+  width: number,
+  height: number,
+  offsetX = 0,
+  offsetY = 0,
+): string {
+  const radiusX = width / 2
+  const radiusY = height / 2
+  const centerY = offsetY + radiusY
+
+  return [
+    `M ${offsetX} ${centerY}`,
+    `A ${radiusX} ${radiusY} 0 1 0 ${offsetX + width} ${centerY}`,
+    `A ${radiusX} ${radiusY} 0 1 0 ${offsetX} ${centerY}`,
+    'Z',
+  ].join(' ')
+}
+
 export function createFabricClipPath(
   width = STICKER_PX.width,
   height = STICKER_PX.height,
@@ -112,6 +131,22 @@ export function createFabricClipPath(
     evented: false,
     fill: '#000000',
     fillRule: 'evenodd',
+    left: 0,
+    originX: 'left',
+    originY: 'top',
+    selectable: false,
+    top: 0,
+  })
+}
+
+export function createFabricOuterClipPath(
+  width: number,
+  height: number,
+): Path {
+  return new Path(createOuterStickerPath(width, height), {
+    absolutePositioned: true,
+    evented: false,
+    fill: '#000000',
     left: 0,
     originX: 'left',
     originY: 'top',
@@ -167,6 +202,48 @@ export async function renderDesignForExport(
   await canvas.loadFromJSON(json)
   canvas.backgroundColor = backgroundColor
   canvas.clipPath = createFabricClipPath()
+  canvas.requestRenderAll()
+
+  const dataUrl = canvas.toDataURL({
+    enableRetinaScaling: false,
+    format: 'png',
+    multiplier: 1,
+  })
+
+  await canvas.dispose()
+  return dataUrl
+}
+
+export async function renderDesignForPrintBleed(
+  json: Record<string, unknown>,
+  fallbackBackgroundColor = DEFAULT_STICKER_BACKGROUND_COLOR,
+): Promise<string> {
+  const bleedPxX = Math.round((PRINT_BLEED_MM / STICKER_MM.width) * STICKER_PX.width)
+  const bleedPxY = Math.round((PRINT_BLEED_MM / STICKER_MM.height) * STICKER_PX.height)
+  const width = STICKER_PX.width + bleedPxX * 2
+  const height = STICKER_PX.height + bleedPxY * 2
+  const canvas = new StaticCanvas(undefined, {
+    enableRetinaScaling: false,
+    height,
+    renderOnAddRemove: false,
+    width,
+  })
+  const backgroundColor = typeof json.backgroundColor === 'string'
+    ? json.backgroundColor
+    : fallbackBackgroundColor
+
+  canvas.backgroundColor = backgroundColor
+  canvas.clipPath = createFabricOuterClipPath(width, height)
+  await canvas.loadFromJSON(json)
+  canvas.getObjects().forEach((object) => {
+    object.set({
+      left: (object.left ?? 0) + bleedPxX,
+      top: (object.top ?? 0) + bleedPxY,
+    })
+    object.setCoords()
+  })
+  canvas.backgroundColor = backgroundColor
+  canvas.clipPath = createFabricOuterClipPath(width, height)
   canvas.requestRenderAll()
 
   const dataUrl = canvas.toDataURL({
